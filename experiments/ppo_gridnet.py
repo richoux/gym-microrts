@@ -1,5 +1,10 @@
 # http://proceedings.mlr.press/v97/han19a/han19a.pdf
 
+import socket
+import sys
+
+import asr_pb2
+
 import argparse
 import os
 import random
@@ -151,6 +156,7 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None):
         logits = torch.where(masks.bool(), logits, mask_value)
+        # print("masks ", masks, ",  logits ", logits)
         super(CategoricalMasked, self).__init__(probs, logits, validate_args)
 
 
@@ -206,12 +212,18 @@ class Agent(nn.Module):
 
         if action is None:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+            #print("invalid_action_masks ", invalid_action_masks)
+            # invalid_action_masks [6144, 78], 6144 = 256 cells of the grid * 24 games
             split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
+            #print("split_invalid_action_masks ", split_invalid_action_masks[0], split_invalid_action_masks[1])
+            # split_invalid_action_masks ([6144, 6], [6144, 4], [6144, 4], [6144, 4], [6144, 4], [6144, 7], [6144, 49])
             multi_categoricals = [
                 CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
                 for (logits, iam) in zip(split_logits, split_invalid_action_masks)
             ]
             action = torch.stack([categorical.sample() for categorical in multi_categoricals])
+            #print("action ", action)
+            # action [7, 6144] with integers for the 7 chosen parameters of the action 
         else:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
             action = action.view(-1, action.shape[-1]).T
@@ -301,6 +313,27 @@ if __name__ == "__main__":
 
     print(f"Save frequency: {args.save_frequency}")
 
+    # Python client to connect to C++ server
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("localhost", 1085))
+
+    game_state = asr_pb2.State()
+    unit = game_state.units.add()
+    unit.unit_id = 1
+    unit.actions_id.extend([1,3,57])
+    
+    unit = game_state.units.add()
+    unit.unit_id = 3
+    unit.actions_id.extend([6,8,42])
+    
+    s.send( game_state.SerializeToString() )
+    game_state.ParseFromString( s.recv(1024) )
+    for unit in game_state.units:
+        print( "Unit ", unit.unit_id )
+        for action in unit.actions_id:
+            print( action )
+    
+        
     # TRY NOT TO MODIFY: setup the environment
     experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.prod_mode:
