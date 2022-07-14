@@ -156,9 +156,7 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None):
         logits = torch.where(masks.bool(), logits, mask_value)
-        # print("masks ", masks, ",  logits ", logits)
         super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-
 
 class Transpose(nn.Module):
     def __init__(self, permutation):
@@ -204,26 +202,128 @@ class Agent(nn.Module):
         )
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
-    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, device=None):
+    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, device=None, sock=None):
         hidden = self.encoder(x)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
         split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
 
         if action is None:
+            # invalid_action_masks [24, 256, 78]
+            # presplit_invalid_action_masks ([24, 256, 6], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 7], [24, 256, 49])
+            presplit_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=2)
+
+            # for every of the 24 games, send the game state one by one to the constraint solver
+            for game in range(24):
+                game_state = asr_pb2.State()
+                filtered_actions = torch.zeros(256, 78).to(device);
+                for cell in range(254):
+                    action_type = presplit_invalid_action_masks[0][game][cell] # NOOP, move, harvest, return, produce, attack
+                    move_direction = presplit_invalid_action_masks[1][game][cell] # north, east, south, west
+                    harvest_direction = presplit_invalid_action_masks[2][game][cell] # north, east, south, west
+                    return_direction = presplit_invalid_action_masks[3][game][cell] # north, east, south, west
+                    produce_direction = presplit_invalid_action_masks[4][game][cell] # north, east, south, west
+                    produce_type = presplit_invalid_action_masks[5][game][cell] # resource, base, barrack, worker, light, heavy, ranged
+                    attack_position = presplit_invalid_action_masks[6][game][cell] # [0,48]
+                    if 1.0 in action_type:
+                        unit = game_state.units.add()
+                        unit.unit_id = cell
+                        if action_type[0] == 1.0: # NOOP
+                            unit.actions_id.extend([1]) # value 1
+                        if action_type[1] == 1.0 and 1.0 in move_direction:
+                            for i in range(4):
+                                if move_direction[i] == 1.0:
+                                    unit.actions_id.extend([1+i+1]) # value in [2,5]
+                        if action_type[2] == 1.0 and 1.0 in harvest_direction:
+                            for i in range(4):
+                                if harvest_direction[i] == 1.0:
+                                    unit.actions_id.extend([5+i+1]) # value in [6,9]
+                        if action_type[3] == 1.0 and 1.0 in return_direction:
+                            for i in range(4):
+                                if return_direction[i] == 1.0:
+                                    unit.actions_id.extend([9+i+1]) # value in [10,13]
+                        if action_type[4] == 1.0 and 1.0 in produce_direction and 1.0 in produce_type:
+                            for d in range(4):
+                                for t in range(7):
+                                    if produce_direction[d] == 1.0 and produce_type[t] == 1.0:
+                                        unit.actions_id.extend([13 + 7*d + t + 1]) # value in [14,41]
+                        if action_type[5] == 1.0 and 1.0 in attack_position:
+                            for i in range(49):
+                                if attack_position[i] == 1.0:
+                                    unit.actions_id.extend([41+i+1]) # value in [42,90]
+                
+                if len(game_state.units) > 0: # if the list is not empty,
+                    # if game == 0:
+                    #     print("Before sending:")
+                    #     for unit in game_state.units:
+                    #         print( "Unit ", unit.unit_id )
+                    #         for action in unit.actions_id:
+                    #             print( action )
+
+                    if not sock:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.connect(("localhost", 1085))
+                    
+                    # send the game state to the solver...
+                    sock.send( game_state.SerializeToString() )
+                    # ...and wait for its solution
+                    solution_from_solver = asr_pb2.State()
+                    solution_from_solver.ParseFromString( sock.recv(65356) ) # Is 65356 sufficient? 
+                    
+                    # if game == 0:
+                    #     print("After receiving:")
+                    #     for unit in solution_from_solver.units:
+                    #         print( "Unit ", unit.unit_id )
+                    #         for action in unit.actions_id:
+                    #             print( action )
+
+                    if solution_from_solver.find_solution:
+                        for unit in solution_from_solver.units:
+                            for action in unit.actions_id:
+                                if action == 1:
+                                    filtered_actions[unit.unit_id][0] = 1.0
+                                elif action >=2 and action <= 5:
+                                    filtered_actions[unit.unit_id][1] = 1.0
+                                    filtered_actions[unit.unit_id][6+action-2] = 1.0
+                                elif action >=6 and action <= 9:
+                                    filtered_actions[unit.unit_id][2] = 1.0
+                                    filtered_actions[unit.unit_id][10+action-6] = 1.0
+                                elif action >=10 and action <= 13:
+                                    filtered_actions[unit.unit_id][3] = 1.0
+                                    filtered_actions[unit.unit_id][14+action-10] = 1.0
+                                elif action >=14 and action <= 41:
+                                    filtered_actions[unit.unit_id][4] = 1.0
+                                    if action <= 20:
+                                        filtered_actions[unit.unit_id][18] = 1.0
+                                        filtered_actions[unit.unit_id][22+action-14] = 1.0
+                                    elif action <= 27:
+                                        filtered_actions[unit.unit_id][19] = 1.0
+                                        filtered_actions[unit.unit_id][22+action-21] = 1.0
+                                    elif action <= 34:
+                                        filtered_actions[unit.unit_id][20] = 1.0
+                                        filtered_actions[unit.unit_id][22+action-28] = 1.0
+                                    else: 
+                                        filtered_actions[unit.unit_id][21] = 1.0
+                                        filtered_actions[unit.unit_id][22+action-35] = 1.0
+                                else:
+                                    filtered_actions[unit.unit_id][5] = 1.0
+                                    filtered_actions[unit.unit_id][29+action-42] = 1.0
+                        invalid_action_masks[game] = filtered_actions # Is this legit?
+                    else:
+                        print("Solution not found")
+                        
+            # invalid_action_masks [6144, 78], 6144 = 24 games * 256 cells of the grid
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            #print("invalid_action_masks ", invalid_action_masks)
-            # invalid_action_masks [6144, 78], 6144 = 256 cells of the grid * 24 games
-            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
-            #print("split_invalid_action_masks ", split_invalid_action_masks[0], split_invalid_action_masks[1])
+
             # split_invalid_action_masks ([6144, 6], [6144, 4], [6144, 4], [6144, 4], [6144, 4], [6144, 7], [6144, 49])
+            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
+
             multi_categoricals = [
                 CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
                 for (logits, iam) in zip(split_logits, split_invalid_action_masks)
             ]
-            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
-            #print("action ", action)
             # action [7, 6144] with integers for the 7 chosen parameters of the action 
+            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         else:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
             action = action.view(-1, action.shape[-1]).T
@@ -314,24 +414,24 @@ if __name__ == "__main__":
     print(f"Save frequency: {args.save_frequency}")
 
     # Python client to connect to C++ server
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(("localhost", 1085))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(("localhost", 1085))
 
-    game_state = asr_pb2.State()
-    unit = game_state.units.add()
-    unit.unit_id = 1
-    unit.actions_id.extend([1,3,57])
+    # game_state = asr_pb2.State()
+    # unit = game_state.units.add()
+    # unit.unit_id = 1
+    # unit.actions_id.extend([1,3,57])
     
-    unit = game_state.units.add()
-    unit.unit_id = 3
-    unit.actions_id.extend([6,8,42])
+    # unit = game_state.units.add()
+    # unit.unit_id = 3
+    # unit.actions_id.extend([6,8,42])
     
-    s.send( game_state.SerializeToString() )
-    game_state.ParseFromString( s.recv(1024) )
-    for unit in game_state.units:
-        print( "Unit ", unit.unit_id )
-        for action in unit.actions_id:
-            print( action )
+    # sock.send( game_state.SerializeToString() )
+    # game_state.ParseFromString( sock.recv(1024) )
+    # for unit in game_state.units:
+    #     print( "Unit ", unit.unit_id )
+    #     for action in unit.actions_id:
+    #         print( action )
     
         
     # TRY NOT TO MODIFY: setup the environment
@@ -455,11 +555,13 @@ if __name__ == "__main__":
             global_step += 1 * args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+
             # ALGO LOGIC: put action logic here
             with torch.no_grad():
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
+                # Assign actions to each unit here
                 action, logproba, _, _, vs = agent.get_action_and_value(
-                    next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step], device=device
+                    next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step], device=device, sock=sock
                 )
                 values[step] = vs.flatten()
 
@@ -532,7 +634,7 @@ if __name__ == "__main__":
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
                 _, newlogproba, entropy, _, new_values = agent.get_action_and_value(
-                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, device
+                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, device, sock
                 )
                 ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
