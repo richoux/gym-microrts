@@ -212,21 +212,25 @@ class Agent(nn.Module):
             # invalid_action_masks [24, 256, 78]
             # presplit_invalid_action_masks ([24, 256, 6], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 7], [24, 256, 49])
             presplit_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=2)
-
-            # for every of the 24 games, send the game state one by one to the constraint solver
-            for game in range(24):
-                game_state = asr_pb2.State()
-                filtered_actions = torch.zeros(256, 78).to(device);
+            
+            # for every of the 24 environments, send the game state one by one to the constraint solver
+            training = asr_pb2.Training()
+            for env_index in range(24):
+                environment = training.environments.add()
+                environment.environment_id = env_index
+                something_to_do = False
                 for cell in range(254):
-                    action_type = presplit_invalid_action_masks[0][game][cell] # NOOP, move, harvest, return, produce, attack
-                    move_direction = presplit_invalid_action_masks[1][game][cell] # north, east, south, west
-                    harvest_direction = presplit_invalid_action_masks[2][game][cell] # north, east, south, west
-                    return_direction = presplit_invalid_action_masks[3][game][cell] # north, east, south, west
-                    produce_direction = presplit_invalid_action_masks[4][game][cell] # north, east, south, west
-                    produce_type = presplit_invalid_action_masks[5][game][cell] # resource, base, barrack, worker, light, heavy, ranged
-                    attack_position = presplit_invalid_action_masks[6][game][cell] # [0,48]
+                    #print("presplit_invalid_action_masks[0][", env_index, "][", cell, "]", presplit_invalid_action_masks[0][env_index][cell].shape)
+                    action_type = presplit_invalid_action_masks[0][env_index][cell] # NOOP, move, harvest, return, produce, attack
+                    move_direction = presplit_invalid_action_masks[1][env_index][cell] # north, east, south, west
+                    harvest_direction = presplit_invalid_action_masks[2][env_index][cell] # north, east, south, west
+                    return_direction = presplit_invalid_action_masks[3][env_index][cell] # north, east, south, west
+                    produce_direction = presplit_invalid_action_masks[4][env_index][cell] # north, east, south, west
+                    produce_type = presplit_invalid_action_masks[5][env_index][cell] # resource, base, barrack, worker, light, heavy, ranged
+                    attack_position = presplit_invalid_action_masks[6][env_index][cell] # [0,48]
                     if 1.0 in action_type:
-                        unit = game_state.units.add()
+                        something_to_do = True
+                        unit = environment.units.add()
                         unit.unit_id = cell
                         if action_type[0] == 1.0: # NOOP
                             unit.actions_id.extend([1]) # value 1
@@ -251,66 +255,66 @@ class Agent(nn.Module):
                             for i in range(49):
                                 if attack_position[i] == 1.0:
                                     unit.actions_id.extend([41+i+1]) # value in [42,90]
-                
-                if len(game_state.units) > 0: # if the list is not empty,
-                    # if game == 0:
-                    #     print("Before sending:")
-                    #     for unit in game_state.units:
-                    #         print( "Unit ", unit.unit_id )
-                    #         for action in unit.actions_id:
-                    #             print( action )
-
-                    if not sock:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.connect(("localhost", 1085))
+                environment.has_been_found = something_to_do
+            # if game == 0:
+            #   x  print("Before sending:")
+            #     for unit in game_state.units:
+            #         print( "Unit ", unit.unit_id )
+            #         for action in unit.actions_id:
+            #             print( action )
+            
+            if not sock:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.connect(("localhost", 1085))
                     
-                    # send the game state to the solver...
-                    sock.send( game_state.SerializeToString() )
-                    # ...and wait for its solution
-                    solution_from_solver = asr_pb2.State()
-                    solution_from_solver.ParseFromString( sock.recv(65356) ) # Is 65356 sufficient? 
-                    
-                    # if game == 0:
-                    #     print("After receiving:")
-                    #     for unit in solution_from_solver.units:
-                    #         print( "Unit ", unit.unit_id )
-                    #         for action in unit.actions_id:
-                    #             print( action )
+            # send training data to the solver...
+            sock.send( training.SerializeToString() )
+            # ...and wait for its solution
+            solutions_from_solver = asr_pb2.Training()
+            solutions_from_solver.ParseFromString( sock.recv(4096) )
+            
+            # if game == 0:
+            #     print("After receiving:")
+            #     for unit in solution_from_solver.units:
+            #         print( "Unit ", unit.unit_id )
+            #         for action in unit.actions_id:
+            #             print( action )
 
-                    if solution_from_solver.find_solution:
-                        for unit in solution_from_solver.units:
-                            for action in unit.actions_id:
-                                if action == 1:
-                                    filtered_actions[unit.unit_id][0] = 1.0
-                                elif action >=2 and action <= 5:
-                                    filtered_actions[unit.unit_id][1] = 1.0
-                                    filtered_actions[unit.unit_id][6+action-2] = 1.0
-                                elif action >=6 and action <= 9:
-                                    filtered_actions[unit.unit_id][2] = 1.0
-                                    filtered_actions[unit.unit_id][10+action-6] = 1.0
-                                elif action >=10 and action <= 13:
-                                    filtered_actions[unit.unit_id][3] = 1.0
-                                    filtered_actions[unit.unit_id][14+action-10] = 1.0
-                                elif action >=14 and action <= 41:
-                                    filtered_actions[unit.unit_id][4] = 1.0
-                                    if action <= 20:
-                                        filtered_actions[unit.unit_id][18] = 1.0
-                                        filtered_actions[unit.unit_id][22+action-14] = 1.0
-                                    elif action <= 27:
-                                        filtered_actions[unit.unit_id][19] = 1.0
-                                        filtered_actions[unit.unit_id][22+action-21] = 1.0
-                                    elif action <= 34:
-                                        filtered_actions[unit.unit_id][20] = 1.0
-                                        filtered_actions[unit.unit_id][22+action-28] = 1.0
-                                    else: 
-                                        filtered_actions[unit.unit_id][21] = 1.0
-                                        filtered_actions[unit.unit_id][22+action-35] = 1.0
-                                else:
-                                    filtered_actions[unit.unit_id][5] = 1.0
-                                    filtered_actions[unit.unit_id][29+action-42] = 1.0
-                        invalid_action_masks[game] = filtered_actions # Is this legit?
-                    else:
-                        print("Solution not found")
+            invalid_action_masks = torch.zeros(24, 256, 78).to(device);
+
+            for solution in solutions_from_solver.environments:
+                env_id = solution.environment_id
+                if solution.has_been_found:
+                    for unit in solution.units:
+                        for action in unit.actions_id:
+                            if action == 1:
+                                invalid_action_masks[env_id][unit.unit_id][0] = 1.0
+                            elif action >=2 and action <= 5:
+                                invalid_action_masks[env_id][unit.unit_id][1] = 1.0
+                                invalid_action_masks[env_id][unit.unit_id][6+action-2] = 1.0
+                            elif action >=6 and action <= 9:
+                                invalid_action_masks[env_id][unit.unit_id][2] = 1.0
+                                invalid_action_masks[env_id][unit.unit_id][10+action-6] = 1.0
+                            elif action >=10 and action <= 13:
+                                invalid_action_masks[env_id][unit.unit_id][3] = 1.0
+                                invalid_action_masks[env_id][unit.unit_id][14+action-10] = 1.0
+                            elif action >=14 and action <= 41:
+                                invalid_action_masks[env_id][unit.unit_id][4] = 1.0
+                                if action <= 20:
+                                    invalid_action_masks[env_id][unit.unit_id][18] = 1.0
+                                    invalid_action_masks[env_id][unit.unit_id][22+action-14] = 1.0
+                                elif action <= 27:
+                                    invalid_action_masks[env_id][unit.unit_id][19] = 1.0
+                                    invalid_action_masks[env_id][unit.unit_id][22+action-21] = 1.0
+                                elif action <= 34:
+                                    invalid_action_masks[env_id][unit.unit_id][20] = 1.0
+                                    invalid_action_masks[env_id][unit.unit_id][22+action-28] = 1.0
+                                else: 
+                                    invalid_action_masks[env_id][unit.unit_id][21] = 1.0
+                                    invalid_action_masks[env_id][unit.unit_id][22+action-35] = 1.0
+                            else:
+                                invalid_action_masks[env_id][unit.unit_id][5] = 1.0
+                                invalid_action_masks[env_id][unit.unit_id][29+action-42] = 1.0
                         
             # invalid_action_masks [6144, 78], 6144 = 24 games * 256 cells of the grid
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])

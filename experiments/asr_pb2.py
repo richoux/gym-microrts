@@ -13,7 +13,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tasr.proto\"+\n\x04Unit\x12\x0f\n\x07unit_id\x18\x01 \x01(\x05\x12\x12\n\nactions_id\x18\x02 \x03(\x05\"K\n\x05State\x12\x14\n\x05units\x18\x01 \x03(\x0b\x32\x05.Unit\x12\x1a\n\rfind_solution\x18\x02 \x01(\x08H\x00\x88\x01\x01\x42\x10\n\x0e_find_solutionb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tasr.proto\"+\n\x04Unit\x12\x0f\n\x07unit_id\x18\x01 \x01(\x05\x12\x12\n\nactions_id\x18\x02 \x03(\x05\"k\n\x0b\x45nvironment\x12\x16\n\x0e\x65nvironment_id\x18\x01 \x01(\x05\x12\x14\n\x05units\x18\x02 \x03(\x0b\x32\x05.Unit\x12\x1b\n\x0ehas_been_found\x18\x03 \x01(\x08H\x00\x88\x01\x01\x42\x11\n\x0f_has_been_found\".\n\x08Training\x12\"\n\x0c\x65nvironments\x18\x01 \x03(\x0b\x32\x0c.Environmentb\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'asr_pb2', globals())
@@ -22,6 +22,8 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _UNIT._serialized_start=13
   _UNIT._serialized_end=56
-  _STATE._serialized_start=58
-  _STATE._serialized_end=133
+  _ENVIRONMENT._serialized_start=58
+  _ENVIRONMENT._serialized_end=165
+  _TRAINING._serialized_start=167
+  _TRAINING._serialized_end=213
 # @@protoc_insertion_point(module_scope)
