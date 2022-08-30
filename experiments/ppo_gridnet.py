@@ -214,7 +214,7 @@ class Agent(nn.Module):
             presplit_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=2)
 
             # for every of the 24 games, send the game state one by one to the constraint solver
-            for game in range(24):
+            for game in range(args.num_envs):
                 game_state = asr_pb2.State()
                 filtered_actions = torch.zeros(256, 78).to(device);
                 for cell in range(254):
