@@ -202,7 +202,7 @@ class Agent(nn.Module):
         )
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
-    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, device=None, sock=None):
+    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, num_envs=24, device=None, sock=None):
         hidden = self.encoder(x)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
@@ -211,13 +211,18 @@ class Agent(nn.Module):
         if action is None:
             # invalid_action_masks [24, 256, 78]
             # presplit_invalid_action_masks ([24, 256, 6], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 7], [24, 256, 49])
+            time_start = time.perf_counter_ns()
             presplit_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=2)
+            time_stop = time.perf_counter_ns()
+            print("Runtime for presplit_invalid_action_masks: ", (time_stop - time_start)/1000000, "ms")
 
             # for every of the 24 games, send the game state one by one to the constraint solver
-            for game in range(args.num_envs):
+            for game in range(num_envs):
+                time_start = time.perf_counter_ns()
                 game_state = asr_pb2.State()
                 filtered_actions = torch.zeros(256, 78).to(device);
-                for cell in range(254):
+                for cell in range(256):
+                    time_start_cell = time.perf_counter_ns()
                     action_type = presplit_invalid_action_masks[0][game][cell] # NOOP, move, harvest, return, produce, attack
                     move_direction = presplit_invalid_action_masks[1][game][cell] # north, east, south, west
                     harvest_direction = presplit_invalid_action_masks[2][game][cell] # north, east, south, west
@@ -225,6 +230,10 @@ class Agent(nn.Module):
                     produce_direction = presplit_invalid_action_masks[4][game][cell] # north, east, south, west
                     produce_type = presplit_invalid_action_masks[5][game][cell] # resource, base, barrack, worker, light, heavy, ranged
                     attack_position = presplit_invalid_action_masks[6][game][cell] # [0,48]
+                    time_stop_cell = time.perf_counter_ns()
+                    print("Runtime to read cell informations: ", (time_stop_cell - time_start_cell)/1000000, "ms")
+
+                    time_start_if_action = time.perf_counter_ns()
                     if 1.0 in action_type:
                         unit = game_state.units.add()
                         unit.unit_id = cell
@@ -251,7 +260,13 @@ class Agent(nn.Module):
                             for i in range(49):
                                 if attack_position[i] == 1.0:
                                     unit.actions_id.extend([41+i+1]) # value in [42,90]
-                
+                    time_stop_if_action = time.perf_counter_ns()
+                    print("Runtime to convert actions: ", (time_stop_if_action - time_start_if_action)/1000000, "ms")
+
+                time_stop = time.perf_counter_ns()
+                print("Runtime within game loop preparation: ", (time_stop - time_start)/1000000, "ms")
+
+                                    
                 if len(game_state.units) > 0: # if the list is not empty,
                     # if game == 0:
                     #     print("Before sending:")
@@ -261,14 +276,23 @@ class Agent(nn.Module):
                     #             print( action )
 
                     if not sock:
+                        time_start = time.perf_counter_ns()
                         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         sock.connect(("localhost", 1085))
-                    
+                        time_stop = time.perf_counter_ns()
+                        print("Runtime for creating socket: ", (time_stop - time_start)/1000000, "ms")
+    
                     # send the game state to the solver...
+                    time_start = time.perf_counter_ns()
                     sock.send( game_state.SerializeToString() )
+                    time_stop = time.perf_counter_ns()
+                    print("Runtime for sending game state to the C++ server: ", (time_stop - time_start)/1000000, "ms")
                     # ...and wait for its solution
                     solution_from_solver = asr_pb2.State()
+                    time_start = time.perf_counter_ns()
                     solution_from_solver.ParseFromString( sock.recv(65356) ) # Is 65356 sufficient? 
+                    time_stop = time.perf_counter_ns()
+                    print("Runtime for receiving solution from the C++ server: ", (time_stop - time_start)/1000000, "ms")
                     
                     # if game == 0:
                     #     print("After receiving:")
@@ -277,6 +301,7 @@ class Agent(nn.Module):
                     #         for action in unit.actions_id:
                     #             print( action )
 
+                    time_start = time.perf_counter_ns()
                     if solution_from_solver.find_solution:
                         for unit in solution_from_solver.units:
                             for action in unit.actions_id:
@@ -311,7 +336,9 @@ class Agent(nn.Module):
                         invalid_action_masks[game] = filtered_actions # Is this legit?
                     else:
                         print("Solution not found")
-                        
+                    time_stop = time.perf_counter_ns()
+                    print("Runtime for if solution_from_solver.find_solution: ", (time_stop - time_start)/1000000, "ms")
+
             # invalid_action_masks [6144, 78], 6144 = 24 games * 256 cells of the grid
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
 
@@ -560,9 +587,13 @@ if __name__ == "__main__":
             with torch.no_grad():
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
                 # Assign actions to each unit here
+                time_start = time.perf_counter_ns()
                 action, logproba, _, _, vs = agent.get_action_and_value(
-                    next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step], device=device, sock=sock
+                    next_obs, envs=envs, num_envs=args.num_envs, invalid_action_masks=invalid_action_masks[step], device=device, sock=sock
                 )
+                time_stop = time.perf_counter_ns()
+                print("Runtime for calling get action (no grad): ", (time_stop - time_start)/1000000, "ms")
+                raise("Kill")
                 values[step] = vs.flatten()
 
             actions[step] = action
@@ -633,9 +664,12 @@ if __name__ == "__main__":
                 mb_advantages = b_advantages[minibatch_ind]
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                time_start = time.perf_counter_ns()
                 _, newlogproba, entropy, _, new_values = agent.get_action_and_value(
-                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, device, sock
+                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, args.num_envs, device, sock
                 )
+                time_stop = time.perf_counter_ns()
+                print("Runtime for calling get action (i_epoch ", i_epoch_pi, ", start ", start, "): ", (time_stop - time_start)/1000000, "ms")
                 ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
                 # Stats
