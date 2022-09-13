@@ -28,6 +28,8 @@ from gym_microrts.envs.vec_env import (
     MicroRTSGridModeSharedMemVecEnv as MicroRTSGridModeVecEnv,
 )
 
+from gevent import monkey
+monkey.patch_all()
 
 def parse_args():
     # fmt: off
@@ -221,7 +223,7 @@ class Agent(nn.Module):
                 time_start = time.perf_counter_ns()
                 game_state = asr_pb2.State()
                 filtered_actions = torch.zeros(256, 78).to(device);
-                for cell in range(256):
+                for cell in torch.where(presplit_invalid_action_masks[0][game]==1.0)[0]:
                     time_start_cell = time.perf_counter_ns()
                     action_type = presplit_invalid_action_masks[0][game][cell] # NOOP, move, harvest, return, produce, attack
                     move_direction = presplit_invalid_action_masks[1][game][cell] # north, east, south, west
@@ -234,32 +236,21 @@ class Agent(nn.Module):
                     print("Runtime to read cell informations: ", (time_stop_cell - time_start_cell)/1000000, "ms")
 
                     time_start_if_action = time.perf_counter_ns()
-                    if 1.0 in action_type:
-                        unit = game_state.units.add()
-                        unit.unit_id = cell
-                        if action_type[0] == 1.0: # NOOP
-                            unit.actions_id.extend([1]) # value 1
-                        if action_type[1] == 1.0 and 1.0 in move_direction:
-                            for i in range(4):
-                                if move_direction[i] == 1.0:
-                                    unit.actions_id.extend([1+i+1]) # value in [2,5]
-                        if action_type[2] == 1.0 and 1.0 in harvest_direction:
-                            for i in range(4):
-                                if harvest_direction[i] == 1.0:
-                                    unit.actions_id.extend([5+i+1]) # value in [6,9]
-                        if action_type[3] == 1.0 and 1.0 in return_direction:
-                            for i in range(4):
-                                if return_direction[i] == 1.0:
-                                    unit.actions_id.extend([9+i+1]) # value in [10,13]
-                        if action_type[4] == 1.0 and 1.0 in produce_direction and 1.0 in produce_type:
-                            for d in range(4):
-                                for t in range(7):
-                                    if produce_direction[d] == 1.0 and produce_type[t] == 1.0:
-                                        unit.actions_id.extend([13 + 7*d + t + 1]) # value in [14,41]
-                        if action_type[5] == 1.0 and 1.0 in attack_position:
-                            for i in range(49):
-                                if attack_position[i] == 1.0:
-                                    unit.actions_id.extend([41+i+1]) # value in [42,90]
+                    unit = game_state.units.add()
+                    unit.unit_id = cell
+                    if action_type[0] == 1.0: # NOOP
+                        unit.actions_id.extend([1]) # value 1
+                    if action_type[1] == 1.0:
+                        unit.actions_id.extend([1+i+1 for i in torch.where(move_direction == 1.0)[0]]) # value in [2,5]
+                    if action_type[2] == 1.0:
+                        unit.actions_id.extend([5+i+1 for i in torch.where(harvest_direction == 1.0)[0]]) # value in [6,9]
+                    if action_type[3] == 1.0:
+                        unit.actions_id.extend([9+i+1 for i in torch.where(return_direction == 1.0)[0]]) # value in [10,13]
+                    if action_type[4] == 1.0 and 1.0 in produce_direction and 1.0 in produce_type:
+                        for d in torch.where(produce_direction == 1.0)[0]:
+                            unit.actions_id.extend([13 + 7*d + t + 1 for t in torch.where(produce_type == 1.0)[0]]) # value in [14,41]
+                    if action_type[5] == 1.0:
+                        unit.actions_id.extend([41+i+1 for i in torch.where(attack_position == 1.0)[0]]) # value in [42,90]
                     time_stop_if_action = time.perf_counter_ns()
                     print("Runtime to convert actions: ", (time_stop_if_action - time_start_if_action)/1000000, "ms")
 
