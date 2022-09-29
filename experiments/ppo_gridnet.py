@@ -225,6 +225,8 @@ class Agent(nn.Module):
                 #time_start = time.perf_counter_ns()
                 game_state = asr_pb2.State()
                 filtered_actions = torch.zeros(256, 78).to(device)
+                number_units = 0
+                total_number_possible_actions = 0;
                 for cell in {c for c in torch.where(presplit_invalid_action_masks[0][game]==1.0)[0].to('cpu').numpy()}:
                     #time_start_cell = time.perf_counter_ns()
                     action_type = presplit_invalid_action_masks[0][game][cell] # NOOP, move, harvest, return, produce, attack
@@ -239,28 +241,40 @@ class Agent(nn.Module):
 
                     #time_start_if_action = time.perf_counter_ns()
                     unit = game_state.units.add()
+                    number_units = number_units + 1
                     unit.unit_id = cell
                     if action_type[0] == 1.0: # NOOP
                         unit.actions_id.extend([1]) # value 1
-                    if action_type[1] == 1.0:
-                        unit.actions_id.extend([1+i+1 for i in torch.where(move_direction == 1.0)[0]]) # value in [2,5]
-                    if action_type[2] == 1.0:
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[1] == 1.0: # Move
+                        unit.actions_id.extend([1+i+1 for i in torch.where(move_direction == 1.0)[0]]) # value in [2,5] 
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[2] == 1.0: # Harvest
                         unit.actions_id.extend([5+i+1 for i in torch.where(harvest_direction == 1.0)[0]]) # value in [6,9]
-                    if action_type[3] == 1.0:
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[3] == 1.0: # Return to base with minerals
                         unit.actions_id.extend([9+i+1 for i in torch.where(return_direction == 1.0)[0]]) # value in [10,13]
-                    if action_type[4] == 1.0 and 1.0 in produce_direction and 1.0 in produce_type:
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[4] == 1.0 and 1.0 in produce_direction and 1.0 in produce_type: # Produce
                         for d in torch.where(produce_direction == 1.0)[0]:
                             unit.actions_id.extend([13 + 7*d + t + 1 for t in torch.where(produce_type == 1.0)[0]]) # value in [14,41]
-                    if action_type[5] == 1.0:
+                            total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[5] == 1.0: # Attack
                         unit.actions_id.extend([41+i+1 for i in torch.where(attack_position == 1.0)[0]]) # value in [42,90]
+                        total_number_possible_actions = total_number_possible_actions + 1
                     #time_stop_if_action = time.perf_counter_ns()
                     #print("Runtime to convert actions: ", (time_stop_if_action - time_start_if_action)/1000000, "ms")
 
                 #time_stop = time.perf_counter_ns()
                 #print("Runtime within game loop preparation: ", (time_stop - time_start)/1000000, "ms")
 
+                if number_units * 2 < total_number_possible_actions:
+                    enough_actions = True
+                else:
+                    enough_actions = False
 
-                if len(game_state.units) > 0: # if the list is not empty,
+                if len(game_state.units) > 0 and enough_actions: # if the list is not empty,
+                                                                 # and if the number of possible actions is at least greater than twice the number of units 
                     # if game == 0:
                     #     print("Before sending:")
                     #     for unit in game_state.units:
