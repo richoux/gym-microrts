@@ -1,5 +1,7 @@
 # http://proceedings.mlr.press/v97/han19a/han19a.pdf
 
+import socket
+
 import argparse
 import os
 import random
@@ -8,23 +10,26 @@ import time
 from distutils.util import strtobool
 from typing import List
 
+import asr_pb2
+
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from gym.spaces import MultiDiscrete
-from stable_baselines3.common.vec_env import VecEnvWrapper, VecMonitor, VecVideoRecorder
+from torch import nn
+from torch import optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+from gym.spaces import MultiDiscrete
+from stable_baselines3.common.vec_env import VecEnvWrapper, VecMonitor, VecVideoRecorder
+
+from gevent import monkey
 
 from gym_microrts import microrts_ai
 from gym_microrts.envs.vec_env import (
     MicroRTSGridModeSharedMemVecEnv as MicroRTSGridModeVecEnv,
 )
-import copy
-import torch.nn.functional as F
 
+# monkey.patch_all()
 
 def parse_args():
     # fmt: off
@@ -59,7 +64,7 @@ def parse_args():
         help='the number of mini batch')
     parser.add_argument('--num-bot-envs', type=int, default=0,
         help='the number of bot game environment; 16 bot envs measn 16 games')
-    parser.add_argument('--num-selfplay-envs', type=int, default=2,
+    parser.add_argument('--num-selfplay-envs', type=int, default=24,
         help='the number of self play envs; 16 self play envs means 8 games')
     parser.add_argument('--num-steps', type=int, default=256,
         help='the number of steps per game environment')
@@ -100,26 +105,16 @@ def parse_args():
     parser.add_argument('--eval-maps', nargs='+', default=["maps/16x16/basesWorkers16x16A.xml"],
         help='the list of maps used during evaluation')
 
-    #evaluate the learning progress
-    parser.add_argument('--progress-type', type=int, default=1,
-        help='Evaluate the learning progress using: 0: does not compute progress, 1: return, 1: policy changes')
-
-    parser.add_argument('--nb_policies', type=int, default=3,
-        help='Number of policies being used to evaluate the progress (used when progress_type=2)')
-
-
-    
-
-    args = parser.parse_args()
-    if not args.seed:
-        args.seed = int(time.time())
-    args.num_envs = args.num_selfplay_envs + args.num_bot_envs
-    args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.n_minibatch)
-    args.num_updates = args.total_timesteps // args.batch_size
-    args.save_frequency = max(1, int(args.num_updates // args.num_models))
+    arguments = parser.parse_args()
+    if not arguments.seed:
+        arguments.seed = int(time.time())
+    arguments.num_envs = arguments.num_selfplay_envs + arguments.num_bot_envs
+    arguments.batch_size = int(arguments.num_envs * arguments.num_steps)
+    arguments.minibatch_size = int(arguments.batch_size // arguments.n_minibatch)
+    arguments.num_updates = arguments.total_timesteps // arguments.batch_size
+    arguments.save_frequency = max(1, int(arguments.num_updates // arguments.num_models))
     # fmt: on
-    return args
+    return arguments
 
 
 class MicroRTSStatsRecorder(VecEnvWrapper):
@@ -137,14 +132,14 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
     def step_wait(self):
         obs, rews, dones, infos = self.venv.step_wait()
         newinfos = list(infos[:])
-        for i in range(len(dones)):
+        for i, done in enumerate(dones):
             self.raw_rewards[i] += [infos[i]["raw_rewards"]]
             self.raw_discount_rewards[i] += [
                 (self.gamma ** self.ts[i])
                 * np.concatenate((infos[i]["raw_rewards"], infos[i]["raw_rewards"].sum()), axis=None)
             ]
             self.ts[i] += 1
-            if dones[i]:
+            if done:
                 info = infos[i].copy()
                 raw_returns = np.array(self.raw_rewards[i]).sum(0)
                 raw_names = [str(rf) for rf in self.rfs]
@@ -161,10 +156,11 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
-    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None):
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=None, mask_value=None):
+        if masks is None:
+            masks = []
         logits = torch.where(masks.bool(), logits, mask_value)
-        super(CategoricalMasked, self).__init__(probs, logits, validate_args)
-
+        super().__init__(probs, logits, validate_args)
 
 class Transpose(nn.Module):
     def __init__(self, permutation):
@@ -183,7 +179,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 class Agent(nn.Module):
     def __init__(self, envs, mapsize=16 * 16):
-        super(Agent, self).__init__()
+        super().__init__()
         self.mapsize = mapsize
         h, w, c = envs.observation_space.shape
         self.encoder = nn.Sequential(
@@ -210,19 +206,157 @@ class Agent(nn.Module):
         )
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
-    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, device=None):
+    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, num_envs=24, device=None, sock=None):
         hidden = self.encoder(x)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
         split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
 
         if action is None:
+            # invalid_action_masks [24, 256, 78]
+            # presplit_invalid_action_masks ([24, 256, 6], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 4], [24, 256, 7], [24, 256, 49])
+            #time_start = time.perf_counter_ns()
+            presplit_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=2)
+            #time_stop = time.perf_counter_ns()
+            #print("Runtime for presplit_invalid_action_masks: ", (time_stop - time_start)/1000000, "ms")
+
+            # for every of the 24 games, send the game state one by one to the constraint solver
+            for game in range(num_envs):
+                #time_start = time.perf_counter_ns()
+                game_state = asr_pb2.State()
+                filtered_actions = torch.zeros(256, 78).to(device)
+                number_units = 0
+                total_number_possible_actions = 0;
+                for cell in {c for c in torch.where(presplit_invalid_action_masks[0][game]==1.0)[0].to('cpu').numpy()}:
+                    #time_start_cell = time.perf_counter_ns()
+                    action_type = presplit_invalid_action_masks[0][game][cell] # NOOP, move, harvest, return, produce, attack
+                    move_direction = presplit_invalid_action_masks[1][game][cell] # north, east, south, west
+                    harvest_direction = presplit_invalid_action_masks[2][game][cell] # north, east, south, west
+                    return_direction = presplit_invalid_action_masks[3][game][cell] # north, east, south, west
+                    produce_direction = presplit_invalid_action_masks[4][game][cell] # north, east, south, west
+                    produce_type = presplit_invalid_action_masks[5][game][cell] # resource, base, barrack, worker, light, heavy, ranged
+                    attack_position = presplit_invalid_action_masks[6][game][cell] # [0,48]
+                    #time_stop_cell = time.perf_counter_ns()
+                    #print("Runtime to read cell informations: ", (time_stop_cell - time_start_cell)/1000000, "ms")
+
+                    #time_start_if_action = time.perf_counter_ns()
+                    unit = game_state.units.add()
+                    number_units = number_units + 1
+                    unit.unit_id = cell
+                    if action_type[0] == 1.0: # NOOP
+                        unit.actions_id.extend([1]) # value 1
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[1] == 1.0: # Move
+                        unit.actions_id.extend([1+i+1 for i in torch.where(move_direction == 1.0)[0]]) # value in [2,5] 
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[2] == 1.0: # Harvest
+                        unit.actions_id.extend([5+i+1 for i in torch.where(harvest_direction == 1.0)[0]]) # value in [6,9]
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[3] == 1.0: # Return to base with minerals
+                        unit.actions_id.extend([9+i+1 for i in torch.where(return_direction == 1.0)[0]]) # value in [10,13]
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[4] == 1.0 and 1.0 in produce_direction and 1.0 in produce_type: # Produce
+                        for d in torch.where(produce_direction == 1.0)[0]:
+                            unit.actions_id.extend([13 + 7*d + t + 1 for t in torch.where(produce_type == 1.0)[0]]) # value in [14,41]
+                            total_number_possible_actions = total_number_possible_actions + 1
+                    if action_type[5] == 1.0: # Attack
+                        unit.actions_id.extend([41+i+1 for i in torch.where(attack_position == 1.0)[0]]) # value in [42,90]
+                        total_number_possible_actions = total_number_possible_actions + 1
+                    #time_stop_if_action = time.perf_counter_ns()
+                    #print("Runtime to convert actions: ", (time_stop_if_action - time_start_if_action)/1000000, "ms")
+
+                #time_stop = time.perf_counter_ns()
+                #print("Runtime within game loop preparation: ", (time_stop - time_start)/1000000, "ms")
+
+                if number_units * 2 < total_number_possible_actions:
+                    enough_actions = True
+                else:
+                    enough_actions = False
+
+                if len(game_state.units) > 0 and enough_actions: # if the list is not empty,
+                                                                 # and if the number of possible actions is at least greater than twice the number of units 
+                    # if game == 0:
+                    #     print("Before sending:")
+                    #     for unit in game_state.units:
+                    #         print( "Unit ", unit.unit_id )
+                    #         for action in unit.actions_id:
+                    #             print( action )
+
+                    if not sock:
+                        #time_start = time.perf_counter_ns()
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.connect(("localhost", 1085))
+                        #time_stop = time.perf_counter_ns()
+                        #print("Runtime for creating socket: ", (time_stop - time_start)/1000000, "ms")
+
+                    # send the game state to the solver...
+                    #time_start = time.perf_counter_ns()
+                    sock.send( game_state.SerializeToString() )
+                    #time_stop = time.perf_counter_ns()
+                    #print("Runtime for sending game state to the C++ server: ", (time_stop - time_start)/1000000, "ms")
+                    # ...and wait for its solution
+                    solution_from_solver = asr_pb2.State()
+                    #time_start = time.perf_counter_ns()
+                    solution_from_solver.ParseFromString( sock.recv(65356) ) # Is 65356 sufficient?
+                    #time_stop = time.perf_counter_ns()
+                    #print("Runtime for receiving solution from the C++ server: ", (time_stop - time_start)/1000000, "ms")
+
+                    # if game == 0:
+                    #     print("After receiving:")
+                    #     for unit in solution_from_solver.units:
+                    #         print( "Unit ", unit.unit_id )
+                    #         for action in unit.actions_id:
+                    #             print( action )
+
+                    #time_start = time.perf_counter_ns()
+                    if solution_from_solver.find_solution:
+                        for unit in solution_from_solver.units:
+                            for action_id in unit.actions_id:
+                                if action_id == 1:
+                                    filtered_actions[unit.unit_id][0] = 1.0
+                                elif 2 <= action_id <= 5:
+                                    filtered_actions[unit.unit_id][1] = 1.0
+                                    filtered_actions[unit.unit_id][6 + action_id - 2] = 1.0
+                                elif 6 <= action_id <= 9:
+                                    filtered_actions[unit.unit_id][2] = 1.0
+                                    filtered_actions[unit.unit_id][10 + action_id - 6] = 1.0
+                                elif 10 <= action_id <= 13:
+                                    filtered_actions[unit.unit_id][3] = 1.0
+                                    filtered_actions[unit.unit_id][14 + action_id - 10] = 1.0
+                                elif 14 <= action_id <= 41:
+                                    filtered_actions[unit.unit_id][4] = 1.0
+                                    if action_id <= 20:
+                                        filtered_actions[unit.unit_id][18] = 1.0
+                                        filtered_actions[unit.unit_id][22 + action_id - 14] = 1.0
+                                    elif action_id <= 27:
+                                        filtered_actions[unit.unit_id][19] = 1.0
+                                        filtered_actions[unit.unit_id][22 + action_id - 21] = 1.0
+                                    elif action_id <= 34:
+                                        filtered_actions[unit.unit_id][20] = 1.0
+                                        filtered_actions[unit.unit_id][22 + action_id - 28] = 1.0
+                                    else:
+                                        filtered_actions[unit.unit_id][21] = 1.0
+                                        filtered_actions[unit.unit_id][22 + action_id - 35] = 1.0
+                                else:
+                                    filtered_actions[unit.unit_id][5] = 1.0
+                                    filtered_actions[unit.unit_id][29 + action_id - 42] = 1.0
+                        invalid_action_masks[game] = filtered_actions # Is this legit?
+                    else:
+                        print("Solution not found")
+                    #time_stop = time.perf_counter_ns()
+                    #print("Runtime for if solution_from_solver.find_solution: ", (time_stop - time_start)/1000000, "ms")
+
+            # invalid_action_masks [6144, 78], 6144 = 24 games * 256 cells of the grid
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
+
+            # split_invalid_action_masks ([6144, 6], [6144, 4], [6144, 4], [6144, 4], [6144, 4], [6144, 7], [6144, 49])
             split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
+
             multi_categoricals = [
                 CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
                 for (logits, iam) in zip(split_logits, split_invalid_action_masks)
             ]
+            # action [7, 6144] with integers for the 7 chosen parameters of the action
             action = torch.stack([categorical.sample() for categorical in multi_categoricals])
         else:
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
@@ -232,7 +366,6 @@ class Agent(nn.Module):
                 CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
                 for (logits, iam) in zip(split_logits, split_invalid_action_masks)
             ]
-
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
         entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
         num_predicted_parameters = len(envs.action_plane_space.nvec)
@@ -240,43 +373,6 @@ class Agent(nn.Module):
         entropy = entropy.T.view(-1, self.mapsize, num_predicted_parameters)
         action = action.T.view(-1, self.mapsize, num_predicted_parameters)
         return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden)
-
-
-
-
-    def get_action_and_value_proba(self, x, action=None, invalid_action_masks=None, envs=None, device=None):
-        #return also the probability of each action
-        hidden = self.encoder(x)
-        logits = self.actor(hidden)
-        grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
-        split_logits = torch.split(grid_logits, envs.action_plane_space.nvec.tolist(), dim=1)
-
-        if action is None:
-            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
-            multi_categoricals = [
-                CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
-                for (logits, iam) in zip(split_logits, split_invalid_action_masks)
-            ]
-            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
-        else:
-            invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
-            action = action.view(-1, action.shape[-1]).T
-            split_invalid_action_masks = torch.split(invalid_action_masks, envs.action_plane_space.nvec.tolist(), dim=1)
-            multi_categoricals = [
-                CategoricalMasked(logits=logits, masks=iam, mask_value=self.mask_value)
-                for (logits, iam) in zip(split_logits, split_invalid_action_masks)
-            ]
-
-
-        probs = [categorical.probs for categorical in multi_categoricals]
-        logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
-        entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
-        num_predicted_parameters = len(envs.action_plane_space.nvec)
-        logprob = logprob.T.view(-1, self.mapsize, num_predicted_parameters)
-        entropy = entropy.T.view(-1, self.mapsize, num_predicted_parameters)
-        action = action.T.view(-1, self.mapsize, num_predicted_parameters)
-        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden), probs
 
     def get_value(self, x):
         return self.critic(self.encoder(x))
@@ -299,10 +395,10 @@ def run_evaluation(model_path: str, output_path: str, eval_maps: List[str]):
         "--maps",
         *eval_maps,
     ]
-    fd = subprocess.Popen(args)
     print(f"Evaluating {model_path}")
-    return_code = fd.wait()
-    assert return_code == 0
+    with subprocess.Popen(args) as fd:
+        return_code = fd.wait()
+        assert return_code == 0
     return (model_path, output_path)
 
 
@@ -346,19 +442,31 @@ class TrueskillWriter:
             wandb.log({"trueskill_step": wandb.Table(dataframe=self.trueskill_step_df)})
 
 
-def trend_analaysis(data, nb_points, order = 1):
-    n = len(data)
-    index = [(i+1) for i in range(nb_points)]
-    coefficients = np.polyfit(index, list(data)[-nb_points:], order)
-    slope = coefficients[-2]
-    print("Data being used", list(data)[-nb_points:] , slope)
-    return float(slope)
-
-
 if __name__ == "__main__":
     args = parse_args()
 
     print(f"Save frequency: {args.save_frequency}")
+
+    # Python client to connect to C++ server
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(("localhost", 1085))
+
+    # game_state = asr_pb2.State()
+    # unit = game_state.units.add()
+    # unit.unit_id = 1
+    # unit.actions_id.extend([1,3,57])
+
+    # unit = game_state.units.add()
+    # unit.unit_id = 3
+    # unit.actions_id.extend([6,8,42])
+
+    # sock.send( game_state.SerializeToString() )
+    # game_state.ParseFromString( sock.recv(1024) )
+    # for unit in game_state.units:
+    #     print( "Unit ", unit.unit_id )
+    #     for action in unit.actions_id:
+    #         print( action )
+
 
     # TRY NOT TO MODIFY: setup the environment
     experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -443,19 +551,6 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(envs.reset()).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-
-
-
-    if args.progress_type == 2:
-        #use args.nb_policies to evaluate the progress
-        old_policies = [None] * args.nb_policies
-
-
-
-
-    #return analysis
-    all_returns = []
-
     # CRASH AND RESUME LOGIC:
     starting_update = 1
 
@@ -473,7 +568,7 @@ if __name__ == "__main__":
     print("Model's state_dict:")
     for param_tensor in agent.state_dict():
         print(param_tensor, "\t", agent.state_dict()[param_tensor].size())
-    total_params = sum([param.nelement() for param in agent.parameters()])
+    total_params = sum(param.nelement() for param in agent.parameters())
     print("Model's total parameters:", total_params)
 
     # EVALUATION LOGIC:
@@ -494,12 +589,18 @@ if __name__ == "__main__":
             global_step += 1 * args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+
             # ALGO LOGIC: put action logic here
             with torch.no_grad():
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
+                # Assign actions to each unit here
+                #time_start = time.perf_counter_ns()
                 action, logproba, _, _, vs = agent.get_action_and_value(
-                    next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step], device=device
+                    next_obs, envs=envs, num_envs=args.num_envs, invalid_action_masks=invalid_action_masks[step], device=device, sock=sock
                 )
+                #time_stop = time.perf_counter_ns()
+                #print("Runtime for calling get action (no grad): ", (time_stop - time_start)/1000000, "ms")
+                # raise "Kill"
                 values[step] = vs.flatten()
 
             actions[step] = action
@@ -514,7 +615,6 @@ if __name__ == "__main__":
 
             for info in infos:
                 if "episode" in info.keys():
-                    all_returns.append(float(info['episode']['r']))
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
@@ -571,9 +671,12 @@ if __name__ == "__main__":
                 mb_advantages = b_advantages[minibatch_ind]
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                #time_start = time.perf_counter_ns()
                 _, newlogproba, entropy, _, new_values = agent.get_action_and_value(
-                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, device
+                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, args.num_envs, device, sock
                 )
+                #time_stop = time.perf_counter_ns()
+                #print("Runtime for calling get action (i_epoch ", i_epoch_pi, ", start ", start, "): ", (time_stop - time_start)/1000000, "ms")
                 ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
                 # Stats
@@ -604,49 +707,6 @@ if __name__ == "__main__":
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
-
-        #evaluate learning progress
-        if args.progress_type == 1:
-            #measure k last returns and comppute increase and std?
-            if len(all_returns) >= 20:
-                trend = trend_analaysis(all_returns, 20)
-                if trend > 1.0:
-                    print("Return is increasing: {}".format(trend))
-                elif trend < -1.0:
-                    print("Return is decreasing: {}".format(trend))
-                else:
-                    print("Return is stable: {}".format(trend))
-        elif args.progress_type == 2:
-            #check if the list is filled
-            if None not in old_policies:
-                #compute the progress 
-                #compute the advantage of the memory
-                mb_advantages = b_advantages
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-                with torch.no_grad():
-                    # agent.get_action_and_value(
-                    #     b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, device
-                    # )
-
-
-                    _, _, _, _, _ , newProbs = agent.get_action_and_value_proba(b_obs[minibatch_ind], envs=envs, invalid_action_masks   = b_invalid_action_masks[minibatch_ind], device=device)
-                    divergences = []
-                    #store the probabilities
-                    for oldModel in old_policies:
-                        _, _, _, _, _ , oldProb = oldModel.get_action_and_value_proba(b_obs[minibatch_ind], envs=envs, invalid_action_masks   = b_invalid_action_masks[minibatch_ind], device=device)
-                        tmp = []
-                        for nb in range(len(newProbs)):
-                            tmp.append(F.kl_div(newProbs[nb], oldProb[nb]))
-                        divergences.append(sum(tmp))
-                    divergence_score = mean(divergences)
-                    print(divergences, divergence_score)
-
-                #raise("ok")
-
-            #replace oldest policy with current policy
-            old_policies =  [copy.deepcopy(agent)] + old_policies[:-1] 
-
 
         if (update - 1) % args.save_frequency == 0:
             if not os.path.exists(f"models/{experiment_name}"):
