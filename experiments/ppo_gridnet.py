@@ -14,6 +14,8 @@ import asr_pb2
 
 import numpy as np
 import pandas as pd
+import torch.nn.functional as F
+from collections import defaultdict
 import torch
 from torch import nn
 from torch import optim
@@ -442,6 +444,11 @@ class TrueskillWriter:
             wandb.log({"trueskill_step": wandb.Table(dataframe=self.trueskill_step_df)})
 
 
+
+def save_as_csv(f_name, logs):
+    #save the logs as a csv file
+    (pd.DataFrame.from_dict(data=logs, orient='columns').to_csv(f_name+'.csv', header=True))
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -576,6 +583,8 @@ if __name__ == "__main__":
         args.prod_mode, writer, "gym-microrts-static-files/league.csv", "gym-microrts-static-files/league.csv"
     )
 
+    logs = defaultdict(list)
+
     for update in range(starting_update, args.num_updates + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -620,6 +629,13 @@ if __name__ == "__main__":
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                     for key in info["microrts_stats"]:
                         writer.add_scalar(f"charts/episodic_return/{key}", info["microrts_stats"][key], global_step)
+
+                    logs["steps"].append(global_step)
+                    logs["episodic_return"].append(float(info['episode']['r']))
+                    logs["episodic_length"].append(float(info["episode"]["l"]))
+                    for key in info["microrts_stats"]:
+                        logs[key].append(info["microrts_stats"][key])
+                    save_as_csv("runs/"+experiment_name,logs)
                     break
 
         # bootstrap reward if not done. reached the batch limit
