@@ -268,6 +268,15 @@ class Agent(nn.Module):
                 #time_stop = time.perf_counter_ns()
                 #print("Runtime within game loop preparation: ", (time_stop - time_start)/1000000, "ms")
 
+                # Debug code
+                # for unit in game_state.units:
+                #     trace = "Before sending data\n"
+                #     trace = trace + "Game " + str(game) + "\n"
+                #     for unit_dbg in game_state.units:
+                #         trace = trace + "Unit id " + str(unit_dbg.unit_id) + "\n"
+                #         for action_id_dbg in unit_dbg.actions_id:
+                #             trace = trace + "Action " + str(action_id_dbg) + "\n"
+
                 if number_units * 2 < total_number_possible_actions:
                     enough_actions = True
                 else:
@@ -275,12 +284,14 @@ class Agent(nn.Module):
 
                 if len(game_state.units) > 0 and enough_actions: # if the list is not empty,
                                                                  # and if the number of possible actions is at least greater than twice the number of units 
-                    # if game == 0:
-                    #     print("Before sending:")
+                    # print("Game ", game)
+                    # filename= "game_{:02d}.txt".format(game)
+                    # with open(filename, 'w') as f:
+                    #     print("Before sending:", file=f)
                     #     for unit in game_state.units:
-                    #         print( "Unit ", unit.unit_id )
+                    #         print( "Unit ", unit.unit_id, file=f )
                     #         for action in unit.actions_id:
-                    #             print( action )
+                    #             print( action, file=f )
 
                     if not sock:
                         #time_start = time.perf_counter_ns()
@@ -311,6 +322,25 @@ class Agent(nn.Module):
                     #time_start = time.perf_counter_ns()
                     if solution_from_solver.find_solution:
                         for unit in solution_from_solver.units:
+                            # if unit.unit_id < 0 or unit.unit_id >= 256:
+                            #     print(trace)
+                            #     print("After receiving the results")
+                            #     print("Game ", game)
+                            #     for unit_dbg in solution_from_solver.units:
+                            #         print("Unit id ", unit_dbg.unit_id)
+                            #         for action_id_dbg in unit_dbg.actions_id:
+                            #             print("Action ", action_id_dbg)
+                            # else:
+                            #     for action_id in unit.actions_id:
+                            #         if action_id < 0 or action_id > 90:
+                            #             print(trace)
+                            #             print("After receiving the results")
+                            #             print("Game ", game)
+                            #             for unit_dbg in game_state.units:
+                            #                 print("Unit id ", unit_dbg.unit_id)
+                            #                 for action_id_dbg in unit_dbg.actions_id:
+                            #                     print("Action ", action_id_dbg)
+
                             for action_id in unit.actions_id:
                                 if action_id == 1:
                                     filtered_actions[unit.unit_id][0] = 1.0
