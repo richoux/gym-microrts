@@ -24,6 +24,7 @@ from gym_microrts.envs.vec_env import (
 )
 import copy
 import torch.nn.functional as F
+from collections import defaultdict
 
 
 def parse_args():
@@ -59,7 +60,7 @@ def parse_args():
         help='the number of mini batch')
     parser.add_argument('--num-bot-envs', type=int, default=0,
         help='the number of bot game environment; 16 bot envs measn 16 games')
-    parser.add_argument('--num-selfplay-envs', type=int, default=2,
+    parser.add_argument('--num-selfplay-envs', type=int, default=8,
         help='the number of self play envs; 16 self play envs means 8 games')
     parser.add_argument('--num-steps', type=int, default=256,
         help='the number of steps per game environment')
@@ -106,6 +107,12 @@ def parse_args():
 
     parser.add_argument('--nb_policies', type=int, default=3,
         help='Number of policies being used to evaluate the progress (used when progress_type=2)')
+    parser.add_argument('--parameter-tuning', type=bool, default=True,
+        help='If parameter tuning is on, it saves all logs')
+    parser.add_argument('--to-mask-actions', type=list, default=[0,1,2,3,4,5],
+        help='Mask the following actions, [0,1,2,3,4,5] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
+
+
 
 
     
@@ -351,8 +358,28 @@ def trend_analaysis(data, nb_points, order = 1):
     index = [(i+1) for i in range(nb_points)]
     coefficients = np.polyfit(index, list(data)[-nb_points:], order)
     slope = coefficients[-2]
-    print("Data being used", list(data)[-nb_points:] , slope)
+    #print("Data being used", list(data)[-nb_points:] , slope)
     return float(slope)
+
+
+def save_as_csv(f_name, logs):
+    #save the logs as a csv file
+    exclude_keys = ['divergences', 'divergences2']
+    if 'trend' in logs.keys():
+        exclude_keys.append('trend')
+
+    new_logs = {k: logs[k] for k in set(list(logs.keys())) - set(exclude_keys)}
+
+    (pd.DataFrame.from_dict(data=new_logs, orient='columns').to_csv(f_name+'/stats.csv', header=True))
+
+    #save the divergence values in another file (their length is different)
+    (pd.DataFrame.from_dict(data=logs[exclude_keys[0]], orient='columns').to_csv(f_name+'/divergence.csv', header=True))
+    (pd.DataFrame.from_dict(data=logs[exclude_keys[1]], orient='columns').to_csv(f_name+'/divergence2.csv', header=True))
+    if "trend" in logs.keys():
+        (pd.DataFrame.from_dict(data=logs[exclude_keys[2]], orient='columns').to_csv(f_name+'/trend.csv', header=True))
+
+
+
 
 
 if __name__ == "__main__":
@@ -446,7 +473,7 @@ if __name__ == "__main__":
 
 
 
-    if args.progress_type == 2:
+    if args.progress_type == 2 or args.parameter_tuning:
         #use args.nb_policies to evaluate the progress
         old_policies = [None] * args.nb_policies
 
@@ -481,6 +508,12 @@ if __name__ == "__main__":
         args.prod_mode, writer, "gym-microrts-static-files/league.csv", "gym-microrts-static-files/league.csv"
     )
 
+    logs = defaultdict(list)
+    #save arguments in case we need to check the used parameters
+    with open("runs/" + experiment_name +'/arguments.txt', 'w') as f:
+        f.writelines("%s\n" % (l + "\t" + str(vars(args)[l])) for l in vars(args))
+
+
     for update in range(starting_update, args.num_updates + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -497,6 +530,11 @@ if __name__ == "__main__":
             # ALGO LOGIC: put action logic here
             with torch.no_grad():
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
+
+                #mask the needed actions
+                if args.to_mask_actions and args.parameter_tuning:
+                    invalid_action_masks[step][:, :, args.to_mask_actions] = 1
+ 
                 action, logproba, _, _, vs = agent.get_action_and_value(
                     next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step], device=device
                 )
@@ -520,7 +558,17 @@ if __name__ == "__main__":
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                     for key in info["microrts_stats"]:
                         writer.add_scalar(f"charts/episodic_return/{key}", info["microrts_stats"][key], global_step)
+
+                    logs["steps"].append(global_step)
+                    logs["episodic_return"].append(info['episode']['r'])
+                    logs["episodic_length"].append(info["episode"]["r"])
+                    for key in info["microrts_stats"]:
+                        logs[key].append(info["microrts_stats"][key])
+                    save_as_csv("runs/"+experiment_name,logs)
+
+
                     break
+
 
         # bootstrap reward if not done. reached the batch limit
         with torch.no_grad():
@@ -606,7 +654,7 @@ if __name__ == "__main__":
                 optimizer.step()
 
         #evaluate learning progress
-        if args.progress_type == 1:
+        if args.progress_type == 1 or args.parameter_tuning:
             #measure k last returns and comppute increase and std?
             if len(all_returns) >= 20:
                 trend = trend_analaysis(all_returns, 20)
@@ -616,7 +664,9 @@ if __name__ == "__main__":
                     print("Return is decreasing: {}".format(trend))
                 else:
                     print("Return is stable: {}".format(trend))
-        elif args.progress_type == 2 and update % 10 == 0:
+
+                logs["trend"].append(trend)
+        if (args.progress_type == 2 or args.parameter_tuning) and update % 1 == 0:
             #check if the list is filled
             if None not in old_policies:
                 #compute the progress 
@@ -646,9 +696,14 @@ if __name__ == "__main__":
                 #(3, 7, 32768)
                 divergence_score = np.sum(divergences, axis=1).mean(axis=0).mean()
                 divergence_score2 = np.mean(divergences2)
-                print(divergences2, divergence_score, divergence_score2)
+                logs["divergences"].append(divergence_score)
+                logs["divergences2"].append(divergence_score2)
                 #raise("ok")
                 #raise("ok")
+                ### COMPUTE MAX of K max divergences (rather than average of all ?)
+
+
+                #raise("### COMPUTE MAX of K max divergences (rather than average of all ?)")
 
             #replace oldest policy with current policy
             old_policies =  [copy.deepcopy(agent)] + old_policies[:-1] 
