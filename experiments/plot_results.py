@@ -28,45 +28,51 @@ def smooth(scalars, weight= 0.8):
     return smoothed
 
 
-def read_file(f_name):
+def read_file(f_names):
     
     
     to_smooth = ["discounted_ProduceBuildingRewardFunction","ProduceCombatUnitRewardFunction","AttackRewardFunction","discounted_WinLossRewardFunction","ProduceBuildingRewardFunction","discounted_ProduceWorkerRewardFunction","ProduceWorkerRewardFunction","ProduceWorkerRewardFunction","discounted_AttackRewardFunction","ResourceGatherRewardFunction","discounted_ResourceGatherRewardFunction", "discounted_ProduceCombatUnitRewardFunction"]
     
     fig, axs = plt.subplots(3,5, figsize=(24,12))
-    df = pd.read_csv(f_name)
-    df["episodic_return_smoothed"] = smooth(df["episodic_return"], 0.8)
-    sns.lineplot(data=df,x='steps', y='episodic_return_smoothed', ax=axs[0][0])
-    axs[0][0].set_title("Return vs timesteps")
-    axs[0][0].set_xlabel("Number of timesteps")
-    axs[0][0].set_ylabel("Average return")
+    
+    dfs = []
+    for f_name in f_names:
+        dfs.append(pd.read_csv(f_name))
+    
+    
+    for df,i in zip(dfs, range(len(dfs))):
+        df["episodic_return_smoothed"] = smooth(df["episodic_return"], 0.8)
+        sns.lineplot(data=df,x='steps', y='episodic_return_smoothed', ax=axs[0][0], label = f_names[i], legend=False)
+        axs[0][0].set_title("Return vs timesteps")
+        axs[0][0].set_xlabel("Number of timesteps")
+        axs[0][0].set_ylabel("Average return")
     
     
     columns = list(df.columns)
     i = 0
     for c in columns:
         if c not in ["steps", "episodic_return", "Unnamed: 0", "episodic_return_smoothed"]:
-            
             i +=1
             x,y = i // 5, i%5
-            if c in to_smooth:
-                df[c+"_smoothed"] = smooth(df[c], 0.8)
-                sns.lineplot(data=df,x='steps', y=c+"_smoothed", ax=axs[x][y])
-            else:
-                sns.lineplot(data=df,x='steps', y=c, ax=axs[x][y])
-            axs[x][y].set_title( c + "vs timesteps")
-            axs[x][y].set_xlabel("Number of timesteps")
-            axs[x][y].set_ylabel("Average return")
-    
-    
+            for df in dfs:
+                if c in to_smooth:
+                    df[c+"_smoothed"] = smooth(df[c], 0.8)
+                    sns.lineplot(data=df,x='steps', y=c+"_smoothed", ax=axs[x][y])
+                else:
+                    sns.lineplot(data=df,x='steps', y=c, ax=axs[x][y])
+                axs[x][y].set_title( c + " vs timesteps")
+                axs[x][y].set_xlabel("Number of timesteps")
+                axs[x][y].set_ylabel("Average return")
+    handles, labels = axs[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5,0))
     fig.tight_layout()
-    plt.savefig(f_name + "_plots.png")
+    plt.savefig(f_names[0] + "_plots.png")
     plt.show()
 
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp-name', type=str, default="",
+    parser.add_argument('--exp-name',  default=[], nargs='+',
         help='the name of this experiment')
     args = parser.parse_args()
     read_file(args.exp_name)
