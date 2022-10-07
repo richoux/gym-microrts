@@ -279,7 +279,7 @@ class Agent(nn.Module):
                 #         for action_id_dbg in unit_dbg.actions_id:
                 #             trace = trace + "Action " + str(action_id_dbg) + "\n"
 
-                if number_units * 2 < total_number_possible_actions:
+                if number_units * 3 < total_number_possible_actions:
                     enough_actions = True
                 else:
                     enough_actions = False
@@ -629,6 +629,9 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
+            if( global_step >= args.total_timesteps ):
+                break
+
             # ALGO LOGIC: put action logic here
             with torch.no_grad():
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
@@ -667,6 +670,9 @@ if __name__ == "__main__":
                         logs[key].append(info["microrts_stats"][key])
                     save_as_csv("runs/"+experiment_name,logs)
                     break
+
+        if( global_step >= args.total_timesteps ):
+            break
 
         # bootstrap reward if not done. reached the batch limit
         with torch.no_grad():
@@ -783,8 +789,16 @@ if __name__ == "__main__":
         writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
 
+    if not sock:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("localhost", 1085))
+    finish_state = asr_pb2.State()
+    finish_state.terminate = True
+    sock.send( finish_state.SerializeToString() )
+
     if eval_executor is not None:
         # shutdown pool of threads but make sure we finished scheduled evaluations
         eval_executor.shutdown(wait=True, cancel_futures=False)
     envs.close()
     writer.close()
+
