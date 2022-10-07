@@ -114,8 +114,10 @@ def parse_args():
 
     parser.add_argument('--parameter-tuning', type=bool, default=True,
         help='If parameter tuning is on, it saves all logs')
-    parser.add_argument('--to-mask-actions', type=list, default=[0,1,2,3,4,5,6],
-        help='Mask the following actions, [0,1,2,3,4,5,6] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
+    parser.add_argument('--to-mask-actions', type=list, default=[0,2],
+        help='Mask the following actions, [0,1,2,3,4,5] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
+    parser.add_argument('--to-mask-parameter', type=dict, default={1: [0,2]},
+        help='Mask parameters of specific actions depending, example {1:[0,2]}, masks parameters [0,2] of action 1')
 
 
 
@@ -378,13 +380,14 @@ def save_as_csv(f_name, logs):
     #save the divergence values in another file (their length is different)
     (pd.DataFrame.from_dict(data=logs[exclude_keys[0]], orient='columns').to_csv(f_name+'/divergence.csv', header=True))
 
-    #temporary build a dict to save the data in the correct format
-    tmp_dict = defaultdict(list)
-    for c in exclude_keys[1:-1]:
-        vals = np.array(logs[c])
-        for i in range(vals.shape[1]):
-            tmp_dict[c + "_" + str(i)] = vals[:,i]
-    (pd.DataFrame.from_dict(data=tmp_dict, orient='columns').to_csv(f_name+'/divergence2.csv', header=True))
+    if 'divergences2' in logs.keys():
+        #temporary build a dict to save the data in the correct format
+        tmp_dict = defaultdict(list)
+        for c in exclude_keys[1:-1]:
+            vals = np.array(logs[c])
+            for i in range(vals.shape[1]):
+                tmp_dict[c + "_" + str(i)] = vals[:,i]
+        (pd.DataFrame.from_dict(data=tmp_dict, orient='columns').to_csv(f_name+'/divergence2.csv', header=True))
 
 
 
@@ -490,14 +493,22 @@ if __name__ == "__main__":
         #use args.nb_policies to evaluate the progress
         old_policies = [None] * args.nb_policies
 
-    if args.to_mask_actions and args.parameter_tuning:
-        #compute the hard mask that only keeps a few types of actions!
+
+    if args.parameter_tuning:
         corresponding_indices = {0: [0,0], 1: [6, 10], 2: [10, 14], 3: [14, 18],
-                        4: [18, 22], 5: [22, 29], 6: [29,78]}
+                        4: [18, 29], 5: [29,78]}
         hard_mask = np.ones(78)
-        for j in args.to_mask_actions:
-            hard_mask[j] = 0
-            hard_mask[corresponding_indices[j][0]:corresponding_indices[j][1]] = 0
+        if args.to_mask_actions:
+            #compute the hard mask that only keeps a few types of actions!
+            for j in args.to_mask_actions:
+                hard_mask[j] = 0
+                hard_mask[corresponding_indices[j][0]:corresponding_indices[j][1]] = 0
+        if args.to_mask_parameter: 
+            #masks the parameters of some actions
+            print("and args.parameter_tuning",args.to_mask_parameter)
+            for j in args.to_mask_parameter:
+                for p in args.to_mask_parameter[j]:
+                    hard_mask[corresponding_indices[j][0]+p] = 0
         hard_mask = np.argwhere(hard_mask==0).flatten()
 
     #return analysis
