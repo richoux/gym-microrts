@@ -25,6 +25,7 @@ from gym_microrts.envs.vec_env import (
 import copy
 import torch.nn.functional as F
 from collections import defaultdict
+import scipy
 
 
 def parse_args():
@@ -107,10 +108,14 @@ def parse_args():
 
     parser.add_argument('--nb_policies', type=int, default=3,
         help='Number of policies being used to evaluate the progress (used when progress_type=2)')
+
+    parser.add_argument('--update-freq', type=int, default=1,
+        help='How often to update the policy buffer (for computing the progress)')
+
     parser.add_argument('--parameter-tuning', type=bool, default=True,
         help='If parameter tuning is on, it saves all logs')
-    parser.add_argument('--to-mask-actions', type=list, default=[0,1,2,3,4,5],
-        help='Mask the following actions, [0,1,2,3,4,5] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
+    parser.add_argument('--to-mask-actions', type=list, default=[0,1,2,3,4,5,6],
+        help='Mask the following actions, [0,1,2,3,4,5,6] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
 
 
 
@@ -364,19 +369,27 @@ def trend_analaysis(data, nb_points, order = 1):
 
 def save_as_csv(f_name, logs):
     #save the logs as a csv file
-    exclude_keys = ['divergences', 'divergences2']
+    exclude_keys = ['divergences', 'divergences2', 'divergences2_min', 'divergences2_max', 'divergences2_std', 'divergences2_median']
     if 'trend' in logs.keys():
         exclude_keys.append('trend')
-
     new_logs = {k: logs[k] for k in set(list(logs.keys())) - set(exclude_keys)}
-
     (pd.DataFrame.from_dict(data=new_logs, orient='columns').to_csv(f_name+'/stats.csv', header=True))
 
     #save the divergence values in another file (their length is different)
     (pd.DataFrame.from_dict(data=logs[exclude_keys[0]], orient='columns').to_csv(f_name+'/divergence.csv', header=True))
-    (pd.DataFrame.from_dict(data=logs[exclude_keys[1]], orient='columns').to_csv(f_name+'/divergence2.csv', header=True))
+
+    #temporary build a dict to save the data in the correct format
+    tmp_dict = defaultdict(list)
+    for c in exclude_keys[1:-1]:
+        vals = np.array(logs[c])
+        for i in range(vals.shape[1]):
+            tmp_dict[c + "_" + str(i)] = vals[:,i]
+    (pd.DataFrame.from_dict(data=tmp_dict, orient='columns').to_csv(f_name+'/divergence2.csv', header=True))
+
+
+
     if "trend" in logs.keys():
-        (pd.DataFrame.from_dict(data=logs[exclude_keys[2]], orient='columns').to_csv(f_name+'/trend.csv', header=True))
+        (pd.DataFrame.from_dict(data=logs[exclude_keys[-1]], orient='columns').to_csv(f_name+'/trend.csv', header=True))
 
 
 
@@ -477,8 +490,15 @@ if __name__ == "__main__":
         #use args.nb_policies to evaluate the progress
         old_policies = [None] * args.nb_policies
 
-
-
+    if args.to_mask_actions and args.parameter_tuning:
+        #compute the hard mask that only keeps a few types of actions!
+        corresponding_indices = {0: [0,0], 1: [6, 10], 2: [10, 14], 3: [14, 18],
+                        4: [18, 22], 5: [22, 29], 6: [29,78]}
+        hard_mask = np.ones(78)
+        for j in args.to_mask_actions:
+            hard_mask[j] = 0
+            hard_mask[corresponding_indices[j][0]:corresponding_indices[j][1]] = 0
+        hard_mask = np.argwhere(hard_mask==0).flatten()
 
     #return analysis
     all_returns = []
@@ -533,7 +553,12 @@ if __name__ == "__main__":
 
                 #mask the needed actions
                 if args.to_mask_actions and args.parameter_tuning:
-                    invalid_action_masks[step][:, :, args.to_mask_actions] = 1
+                    #shape of invalid_action_masks[step]: (8,256,78)
+                    #mask the not selected actions
+                    invalid_action_masks[step][:, :, hard_mask] = 0
+
+                
+
  
                 action, logproba, _, _, vs = agent.get_action_and_value(
                     next_obs, envs=envs, invalid_action_masks=invalid_action_masks[step], device=device
@@ -666,7 +691,7 @@ if __name__ == "__main__":
                     print("Return is stable: {}".format(trend))
 
                 logs["trend"].append(trend)
-        if (args.progress_type == 2 or args.parameter_tuning) and update % 1 == 0:
+        if (args.progress_type == 2 or args.parameter_tuning) and update % args.update_freq == 0:
             #check if the list is filled
             if None not in old_policies:
                 #compute the progress 
@@ -678,29 +703,35 @@ if __name__ == "__main__":
                     # agent.get_action_and_value(
                     #     b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, device
                     # )
-                    _, _, _, _, _ , newProbs = agent.get_action_and_value_proba(b_obs[minibatch_ind],  envs=envs, invalid_action_masks   = b_invalid_action_masks[minibatch_ind], device=device)
-                    divergences = []
+                    _, _, _, _, _ , newProbs = agent.get_action_and_value_proba(b_obs[minibatch_ind],  envs=envs, invalid_action_masks   = torch.zeros_like(b_invalid_action_masks[minibatch_ind]), device=device)
+                    divergences = [] 
                     divergences2 = []
                     #store the probabilities
                     for oldModel in old_policies:
-                        _, _, _, _, _ , oldProb = oldModel.get_action_and_value_proba(b_obs[minibatch_ind], envs=envs, invalid_action_masks   = b_invalid_action_masks[minibatch_ind], device=device)
+                        _, _, _, _, _ , oldProb = oldModel.get_action_and_value_proba(b_obs[minibatch_ind], envs=envs, invalid_action_masks   = torch.ones_like(b_invalid_action_masks[minibatch_ind]), device=device)
                         tmp = np.array([F.kl_div(newProbs[nb], oldProb[nb], None, None, 'none').cpu().detach().numpy().sum(axis=1) for nb in range(len(newProbs))])
                         divergences.append(tmp)
                         tmp = []
                         for nb in range(len(newProbs)):
-                            tmp.append(F.kl_div(newProbs[nb], oldProb[nb]))
-                        divergences2.append(sum(tmp))
-
-                    
-                    #divergence_score = np.mean(divergences)
-                #(3, 7, 32768)
+                            tmp.append(scipy.stats.entropy(newProbs[nb], qk=oldProb[nb], base=None, axis=1))
+                        divergences2.append(np.array(tmp))
                 divergence_score = np.sum(divergences, axis=1).mean(axis=0).mean()
-                divergence_score2 = np.mean(divergences2)
+                divergences2 = np.array(divergences2) #(3, 7, 131072)
+                divergences2 = np.mean(divergences2, axis=0) #(7, 131072)
+                
+
+                divergence_score3, min_, max_, std_, median_ = np.mean(np.array(divergences2), axis=1), np.min(np.array(divergences2), axis=1), np.max(np.array(divergences2), axis=1), np.std(np.array(divergences2), axis=1), np.median(np.array(divergences2), axis=1)
+                
+
                 logs["divergences"].append(divergence_score)
-                logs["divergences2"].append(divergence_score2)
-                #raise("ok")
-                #raise("ok")
-                ### COMPUTE MAX of K max divergences (rather than average of all ?)
+                logs["divergences2"].append(divergence_score3)
+                logs["divergences2_min"].append(min_)
+                logs["divergences2_max"].append(max_)
+                logs["divergences2_std"].append(std_)
+                logs["divergences2_median"].append(median_)
+
+
+                #IMPORTANT: mask with 0: mask the action, mask 1: allows picking the action!!!
 
 
                 #raise("### COMPUTE MAX of K max divergences (rather than average of all ?)")
