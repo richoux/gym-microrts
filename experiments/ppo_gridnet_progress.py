@@ -309,7 +309,7 @@ def run_evaluation(model_path: str, output_path: str, eval_maps: List[str]):
         "--output-path",
         output_path,
         "--model-type",
-        "ppo_gridnet",
+        "ppo_gridnet_progress",
         "--maps",
         *eval_maps,
     ]

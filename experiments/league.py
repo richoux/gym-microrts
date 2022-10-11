@@ -58,7 +58,7 @@ def parse_args():
         help='the highest sigma of the trueskill evaluation')
     parser.add_argument('--output-path', type=str, default=f"league.temp.csv",
         help='the output path of the leaderboard csv')
-    parser.add_argument('--model-type', type=str, default=f"ppo_gridnet_large", choices=["ppo_gridnet_large", "ppo_gridnet"],
+    parser.add_argument('--model-type', type=str, default=f"ppo_gridnet_large", choices=["ppo_gridnet_large", "ppo_gridnet","ppo_gridnet_progress"],
         help='the output path of the leaderboard csv')
     parser.add_argument('--maps', nargs='+', default=["maps/16x16/basesWorkers16x16A.xml"],
         help="the maps to do trueskill evaluations")
@@ -87,6 +87,13 @@ if args.model_type == "ppo_gridnet_large":
     from ppo_gridnet_large import Agent, MicroRTSStatsRecorder
 
     from gym_microrts.envs.vec_env import MicroRTSBotVecEnv, MicroRTSGridModeVecEnv
+elif args.model_type == "ppo_gridnet_progress":
+    from ppo_gridnet_progress import Agent, MicroRTSStatsRecorder
+
+    from gym_microrts.envs.vec_env import MicroRTSBotVecEnv
+    from gym_microrts.envs.vec_env import (
+        MicroRTSGridModeSharedMemVecEnv as MicroRTSGridModeVecEnv,
+    )
 else:
     from ppo_gridnet import Agent, MicroRTSStatsRecorder
 
