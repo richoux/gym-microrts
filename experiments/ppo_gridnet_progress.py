@@ -114,9 +114,9 @@ def parse_args():
 
     parser.add_argument('--parameter-tuning', type=bool, default=True,
         help='If parameter tuning is on, it saves all logs')
-    parser.add_argument('--to-mask-actions', type=list, default=[0,2],
+    parser.add_argument('--to-mask-actions', type=list, default=[],
         help='Mask the following actions, [0,1,2,3,4,5] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
-    parser.add_argument('--to-mask-parameter', type=dict, default={1: [0,2]},
+    parser.add_argument('--to-mask-parameter', type=dict, default={},
         help='Mask parameters of specific actions depending, example {1:[0,2]}, masks parameters [0,2] of action 1')
 
 
@@ -511,6 +511,7 @@ if __name__ == "__main__":
                     hard_mask[corresponding_indices[j][0]+p] = 0
         hard_mask = np.argwhere(hard_mask==0).flatten()
 
+
     #return analysis
     all_returns = []
 
@@ -563,12 +564,10 @@ if __name__ == "__main__":
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
 
                 #mask the needed actions
-                if args.to_mask_actions and args.parameter_tuning:
+                if (args.to_mask_actions or args.to_mask_parameter) and args.parameter_tuning:
                     #shape of invalid_action_masks[step]: (8,256,78)
                     #mask the not selected actions
-                    invalid_action_masks[step][:, :, hard_mask] = 0
-
-                
+                    invalid_action_masks[step][:, :, hard_mask] = 0.0
 
  
                 action, logproba, _, _, vs = agent.get_action_and_value(
@@ -724,7 +723,7 @@ if __name__ == "__main__":
                         divergences.append(tmp)
                         tmp = []
                         for nb in range(len(newProbs)):
-                            tmp.append(scipy.stats.entropy(newProbs[nb], qk=oldProb[nb], base=None, axis=1))
+                            tmp.append(scipy.stats.entropy(newProbs[nb].cpu().detach().numpy(), qk=oldProb[nb].cpu().detach().numpy(), base=None, axis=1))
                         divergences2.append(np.array(tmp))
                 divergence_score = np.sum(divergences, axis=1).mean(axis=0).mean()
                 divergences2 = np.array(divergences2) #(3, 7, 131072)
