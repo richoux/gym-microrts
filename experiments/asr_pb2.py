@@ -13,7 +13,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tasr.proto\"+\n\x04Unit\x12\x0f\n\x07unit_id\x18\x01 \x01(\x05\x12\x12\n\nactions_id\x18\x02 \x03(\x05\"q\n\x05State\x12\x14\n\x05units\x18\x01 \x03(\x0b\x32\x05.Unit\x12\x1a\n\rfind_solution\x18\x02 \x01(\x08H\x00\x88\x01\x01\x12\x16\n\tterminate\x18\x03 \x01(\x08H\x01\x88\x01\x01\x42\x10\n\x0e_find_solutionB\x0c\n\n_terminateb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tasr.proto\"+\n\x04Unit\x12\x0f\n\x07unit_id\x18\x01 \x01(\x05\x12\x12\n\nactions_id\x18\x02 \x03(\x05\"\x93\x01\n\x05State\x12\x14\n\x05units\x18\x01 \x03(\x0b\x32\x05.Unit\x12\x1a\n\rfind_solution\x18\x02 \x01(\x08H\x00\x88\x01\x01\x12\x16\n\tterminate\x18\x03 \x01(\x08H\x01\x88\x01\x01\x12\x14\n\x07no_call\x18\x04 \x01(\x05H\x02\x88\x01\x01\x42\x10\n\x0e_find_solutionB\x0c\n\n_terminateB\n\n\x08_no_callb\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'asr_pb2', globals())
@@ -22,6 +22,6 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _UNIT._serialized_start=13
   _UNIT._serialized_end=56
-  _STATE._serialized_start=58
-  _STATE._serialized_end=171
+  _STATE._serialized_start=59
+  _STATE._serialized_end=206
 # @@protoc_insertion_point(module_scope)

@@ -208,7 +208,7 @@ class Agent(nn.Module):
         )
         self.register_buffer("mask_value", torch.tensor(-1e8))
 
-    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, num_envs=24, device=None, sock=None):
+    def get_action_and_value(self, x, action=None, invalid_action_masks=None, envs=None, num_envs=24, device=None, sock=None, count_solver_no_call=None):
         hidden = self.encoder(x)
         logits = self.actor(hidden)
         grid_logits = logits.reshape(-1, envs.action_plane_space.nvec.sum())
@@ -279,7 +279,7 @@ class Agent(nn.Module):
                 #         for action_id_dbg in unit_dbg.actions_id:
                 #             trace = trace + "Action " + str(action_id_dbg) + "\n"
 
-                if number_units * 3 < total_number_possible_actions:
+                if number_units * 2 < total_number_possible_actions:
                     enough_actions = True
                 else:
                     enough_actions = False
@@ -377,7 +377,8 @@ class Agent(nn.Module):
                         print("Solution not found")
                     #time_stop = time.perf_counter_ns()
                     #print("Runtime for if solution_from_solver.find_solution: ", (time_stop - time_start)/1000000, "ms")
-
+                else:
+                    count_solver_no_call = count_solver_no_call + 1
             # invalid_action_masks [6144, 78], 6144 = 24 games * 256 cells of the grid
             invalid_action_masks = invalid_action_masks.view(-1, invalid_action_masks.shape[-1])
 
@@ -404,7 +405,7 @@ class Agent(nn.Module):
         logprob = logprob.T.view(-1, self.mapsize, num_predicted_parameters)
         entropy = entropy.T.view(-1, self.mapsize, num_predicted_parameters)
         action = action.T.view(-1, self.mapsize, num_predicted_parameters)
-        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden)
+        return action, logprob.sum(1).sum(1), entropy.sum(1).sum(1), invalid_action_masks, self.critic(hidden), count_solver_no_call
 
     def get_value(self, x):
         return self.critic(self.encoder(x))
@@ -615,6 +616,7 @@ if __name__ == "__main__":
 
     logs = defaultdict(list)
 
+    count_solver_no_call = 0
     for update in range(starting_update, args.num_updates + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -637,8 +639,8 @@ if __name__ == "__main__":
                 invalid_action_masks[step] = torch.tensor(envs.get_action_mask()).to(device)
                 # Assign actions to each unit here
                 #time_start = time.perf_counter_ns()
-                action, logproba, _, _, vs = agent.get_action_and_value(
-                    next_obs, envs=envs, num_envs=args.num_envs, invalid_action_masks=invalid_action_masks[step], device=device, sock=sock
+                action, logproba, _, _, vs, count_solver_no_call = agent.get_action_and_value(
+                    next_obs, envs=envs, num_envs=args.num_envs, invalid_action_masks=invalid_action_masks[step], device=device, sock=sock, count_solver_no_call=count_solver_no_call
                 )
                 #time_stop = time.perf_counter_ns()
                 #print("Runtime for calling get action (no grad): ", (time_stop - time_start)/1000000, "ms")
@@ -724,8 +726,8 @@ if __name__ == "__main__":
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
                 #time_start = time.perf_counter_ns()
-                _, newlogproba, entropy, _, new_values = agent.get_action_and_value(
-                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, args.num_envs, device, sock
+                _, newlogproba, entropy, _, new_values, _ = agent.get_action_and_value(
+                    b_obs[minibatch_ind], b_actions.long()[minibatch_ind], b_invalid_action_masks[minibatch_ind], envs, args.num_envs, device, sock, count_solver_no_call
                 )
                 #time_stop = time.perf_counter_ns()
                 #print("Runtime for calling get action (i_epoch ", i_epoch_pi, ", start ", start, "): ", (time_stop - time_start)/1000000, "ms")
@@ -794,6 +796,7 @@ if __name__ == "__main__":
         sock.connect(("localhost", 1085))
     finish_state = asr_pb2.State()
     finish_state.terminate = True
+    finish_state.no_call = count_solver_no_call
     sock.send( finish_state.SerializeToString() )
 
     if eval_executor is not None:
