@@ -26,6 +26,7 @@ import copy
 import torch.nn.functional as F
 from collections import defaultdict
 import scipy
+import pickle
 
 
 def parse_args():
@@ -509,7 +510,7 @@ if __name__ == "__main__":
     if args.progress_type == 2 or args.parameter_tuning:
         #use args.nb_policies to evaluate the progress
         old_policies = [None] * args.nb_policies
-        previous_entropies = [None] * 5
+        previous_entropies = [None] * 10
         #last time step the mask was changed
         last_change = 0
         #current id
@@ -547,6 +548,8 @@ if __name__ == "__main__":
     trueskill_writer = TrueskillWriter(
         args.prod_mode, writer, "gym-microrts-static-files/league.csv", "gym-microrts-static-files/league.csv"
     )
+
+    total_data = defaultdict(list)
 
     logs = defaultdict(list)
     #save arguments in case we need to check the used parameters
@@ -696,6 +699,26 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
+
+        #save some data (not useful normally)
+        if False:
+            if update in [5,10,30]:
+                total_data["obs"].append(b_obs.cpu().detach().numpy())
+                total_data["b_logprobs"].append(b_logprobs.cpu().detach().numpy())
+                total_data["b_actions"].append(b_actions.cpu().detach().numpy())
+                total_data["b_advantages"].append(b_advantages.cpu().detach().numpy())
+                total_data["b_returns"].append(b_returns.cpu().detach().numpy())
+                total_data["b_values"].append(b_values.cpu().detach().numpy())
+                total_data["b_invalid_action_masks"].append(b_invalid_action_masks.cpu().detach().numpy())
+
+                with open('data.pickle', 'wb') as handle:
+                    pickle.dump(total_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                print("HAS BEEN SAVED")
+
+
+            if update == 30:
+                raise("OKOOOO")
+
         #evaluate learning progress
         if args.progress_type == 1 or args.parameter_tuning:
             #measure k last returns and comppute increase and std?
@@ -762,7 +785,7 @@ if __name__ == "__main__":
         if None not in previous_entropies:
             score_entropy = np.mean(previous_entropies)
             #condition to allow more actions
-            if score_entropy < 2.5 and global_step - last_change > 1e6:
+            if score_entropy < 1.0 and global_step - last_change > 1e6:
                 #check if there is another config to test
                 if current_id < len(args.to_mask_parameter):
                     current_id +=1
