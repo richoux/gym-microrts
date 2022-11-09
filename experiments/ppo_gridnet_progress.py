@@ -26,6 +26,7 @@ import copy
 import torch.nn.functional as F
 from collections import defaultdict
 import scipy
+import pickle
 
 
 def parse_args():
@@ -116,8 +117,8 @@ def parse_args():
         help='If parameter tuning is on, it saves all logs')
     parser.add_argument('--to-mask-actions', type=list, default=[],
         help='Mask the following actions, [0,1,2,3,4,5] masks all actions, [] masks no actions') #NOOP, move, harvest, return, produce, attack
-    parser.add_argument('--to-mask-parameter', type=dict, default={},
-        help='Mask parameters of specific actions depending, example {1:[0,2]}, masks parameters [0,2] of action 1')
+    parser.add_argument('--to-mask-parameter', type=list, default=[{2: [0, 1, 3], 4: [6, 8, 9, 10]},{2: [0, 1, 3], 4: [8, 9, 10]}, {2: [0, 1, 3], 4: [9, 10]}, {2: [0, 1, 3]}, {}],
+        help='Mask parameters of specific actions depending, example [{1:[0,2]}], masks parameters [0,2] of action 1') #4 - 10: resource, base, barrack, worker, light, heavy, ranged
 
 
 
@@ -395,6 +396,23 @@ def save_as_csv(f_name, logs):
         (pd.DataFrame.from_dict(data=logs[exclude_keys[-1]], orient='columns').to_csv(f_name+'/trend.csv', header=True))
 
 
+def recompute_mask(current_id):
+    corresponding_indices = {0: [0,0], 1: [6, 10], 2: [10, 14], 3: [14, 18],
+                        4: [18, 29], 5: [29,78]}
+    hard_mask = np.ones(78)
+    if args.to_mask_actions:
+        #compute the hard mask that only keeps a few types of actions!
+        for j in args.to_mask_actions[current_id]:
+            hard_mask[j] = 0
+            hard_mask[corresponding_indices[j][0]:corresponding_indices[j][1]] = 0
+    if args.to_mask_parameter: 
+        #masks the parameters of some actions
+        print("and args.parameter_tuning",args.to_mask_parameter[current_id])
+        for j in args.to_mask_parameter[current_id]:
+            for p in args.to_mask_parameter[current_id][j]:
+                hard_mask[corresponding_indices[j][0]+p] = 0
+    hard_mask = np.argwhere(hard_mask==0).flatten()
+    return hard_mask
 
 
 
@@ -492,25 +510,16 @@ if __name__ == "__main__":
     if args.progress_type == 2 or args.parameter_tuning:
         #use args.nb_policies to evaluate the progress
         old_policies = [None] * args.nb_policies
+        previous_entropies = [None] * 10
+        #last time step the mask was changed
+        last_change = 0
+        #current id
+        current_id = 0
 
 
     if args.parameter_tuning:
-        corresponding_indices = {0: [0,0], 1: [6, 10], 2: [10, 14], 3: [14, 18],
-                        4: [18, 29], 5: [29,78]}
-        hard_mask = np.ones(78)
-        if args.to_mask_actions:
-            #compute the hard mask that only keeps a few types of actions!
-            for j in args.to_mask_actions:
-                hard_mask[j] = 0
-                hard_mask[corresponding_indices[j][0]:corresponding_indices[j][1]] = 0
-        if args.to_mask_parameter: 
-            #masks the parameters of some actions
-            print("and args.parameter_tuning",args.to_mask_parameter)
-            for j in args.to_mask_parameter:
-                for p in args.to_mask_parameter[j]:
-                    hard_mask[corresponding_indices[j][0]+p] = 0
-        hard_mask = np.argwhere(hard_mask==0).flatten()
-
+        #new
+        hard_mask = recompute_mask(current_id)
 
     #return analysis
     all_returns = []
@@ -539,6 +548,8 @@ if __name__ == "__main__":
     trueskill_writer = TrueskillWriter(
         args.prod_mode, writer, "gym-microrts-static-files/league.csv", "gym-microrts-static-files/league.csv"
     )
+
+    total_data = defaultdict(list)
 
     logs = defaultdict(list)
     #save arguments in case we need to check the used parameters
@@ -688,6 +699,26 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
+
+        #save some data (not useful normally)
+        if False:
+            if update in [5,10,30]:
+                total_data["obs"].append(b_obs.cpu().detach().numpy())
+                total_data["b_logprobs"].append(b_logprobs.cpu().detach().numpy())
+                total_data["b_actions"].append(b_actions.cpu().detach().numpy())
+                total_data["b_advantages"].append(b_advantages.cpu().detach().numpy())
+                total_data["b_returns"].append(b_returns.cpu().detach().numpy())
+                total_data["b_values"].append(b_values.cpu().detach().numpy())
+                total_data["b_invalid_action_masks"].append(b_invalid_action_masks.cpu().detach().numpy())
+
+                with open('data.pickle', 'wb') as handle:
+                    pickle.dump(total_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                print("HAS BEEN SAVED")
+
+
+            if update == 30:
+                raise("OKOOOO")
+
         #evaluate learning progress
         if args.progress_type == 1 or args.parameter_tuning:
             #measure k last returns and comppute increase and std?
@@ -746,9 +777,22 @@ if __name__ == "__main__":
 
                 #raise("### COMPUTE MAX of K max divergences (rather than average of all ?)")
 
-            #replace oldest policy with current policy
-            old_policies =  [copy.deepcopy(agent)] + old_policies[:-1] 
+        #replace oldest policy with current policy
+        old_policies =  [copy.deepcopy(agent)] + old_policies[:-1] 
 
+        #compute the entropy
+        previous_entropies = [entropy.detach().mean().item()] + previous_entropies[:-1] 
+        if None not in previous_entropies:
+            score_entropy = np.mean(previous_entropies)
+            #condition to allow more actions
+            if score_entropy < 1.0 and global_step - last_change > 1e6:
+                #check if there is another config to test
+                if current_id < len(args.to_mask_parameter):
+                    current_id +=1
+                    hard_mask = recompute_mask(current_id)
+                    print("\n\n\n\nThe hard mask has been automatically updated as follows: {}\n\n\n\n".format(hard_mask))
+                    last_change = global_step
+            print("Current entropy score {}, current_id {}, and last_change {}".format(score_entropy, current_id, last_change))
 
         if (update - 1) % args.save_frequency == 0:
             if not os.path.exists(f"models/{experiment_name}"):
