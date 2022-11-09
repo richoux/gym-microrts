@@ -31,6 +31,8 @@ from gym_microrts.envs.vec_env import (
     MicroRTSGridModeSharedMemVecEnv as MicroRTSGridModeVecEnv,
 )
 
+COEFFICIENT = 4
+
 # monkey.patch_all()
 
 def parse_args():
@@ -279,7 +281,7 @@ class Agent(nn.Module):
                 #         for action_id_dbg in unit_dbg.actions_id:
                 #             trace = trace + "Action " + str(action_id_dbg) + "\n"
 
-                if number_units * 2 < total_number_possible_actions:
+                if number_units * COEFFICIENT < total_number_possible_actions:
                     enough_actions = True
                 else:
                     enough_actions = False
